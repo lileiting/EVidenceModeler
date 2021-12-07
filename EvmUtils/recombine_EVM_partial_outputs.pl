@@ -7,6 +7,8 @@ use warnings;
 use Data::Dumper;
 use Getopt::Long qw(:config no_ignore_case bundling);
 use File::Basename;
+use Parallel::ForkManager;
+use Sys::CpuAffinity;
 
 my ($SEE, $help, $partitions_file, $output_file_name);
 
@@ -37,7 +39,10 @@ while (<$fh>) {
 }
 close $fh;
 
-foreach my $base_dir (keys %base_directories_to_partitions) {
+my $pm = Parallel::ForkManager->new(Sys::CpuAffinity::getNumCpus());
+foreach my $base_dir (sort {$a cmp $b} keys %base_directories_to_partitions) {
+    $pm->start and next;
+    warn "# Start processing $base_dir ...\n";
     my $partition_dirs_href = $base_directories_to_partitions{$base_dir};
 
     my @predictions;
@@ -68,7 +73,11 @@ foreach my $base_dir (keys %base_directories_to_partitions) {
     }
     
     close $out_fh;
+    warn "# Finished $base_dir!\n";
+    $pm->finish;
 }
+
+$pm->wait_all_children;
 
 exit(0);
 
