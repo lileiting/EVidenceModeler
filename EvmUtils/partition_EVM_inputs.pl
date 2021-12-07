@@ -10,6 +10,11 @@ use lib ("$FindBin::Bin/../PerlLib");
 use Fasta_reader;
 use Data::Dumper;
 use File::Basename;
+use Parallel::ForkManager;
+use Sys::CpuAffinity;
+use Time::Elapse;
+Time::Elapse->lapse(my $now);
+my $pm = Parallel::ForkManager->new(Sys::CpuAffinity::getNumCpus());
 
 umask(0000);
 
@@ -120,8 +125,9 @@ my $curr_dir = cwd();
 my $util_dir = $FindBin::Bin;
 my $gff_partitioner = "$util_dir/gff_range_retriever.pl";
 
-
+warn "### (Elapsed time: $now) Begin partition files on contig\n";
 &partition_files_based_on_contig(@files_to_process);
+warn "### (Elapsed time: $now) Finished partition files on contig\n";
 
 
 open (my $ofh, ">$partition_listing") or die "Error, cannot write $partition_listing file";
@@ -175,23 +181,40 @@ while (my $seq_obj = $fasta_reader->next()) {
             my $range_length = $range_rend - $range_lend + 1;
             
             my $partition_dir = "$acc_dir/$accession" . "_$range_lend" . "-$range_rend";
-            mkdir $partition_dir or die "Error, cannot mkdir $partition_dir";
-            my $genome_subseq = substr($sequence, $range_lend - 1, $range_length);
-            $genome_subseq =~ s/(\S{60})/$1\n/g; #make fasta format
+            print $ofh "$accession\t$acc_dir\tY\t$partition_dir\n";
+            $pm->start and next;
+            warn "### Start processing $partition_dir ...\n";
+            unless(-d $partition_dir){
+                mkdir $partition_dir or die "Error, cannot mkdir $partition_dir";
+            }
+
+            unless(-e "$partition_dir/$genome_basename" and 
+              get_sequence_length("$partition_dir/$genome_basename") == $range_length){
+                my $genome_subseq = substr($sequence, $range_lend - 1, $range_length);
+                $genome_subseq =~ s/(\S{60})/$1\n/g; #make fasta format
             
-            open (my $part_ofh, ">$partition_dir/$genome_basename") or die "Error, cannot write to $partition_dir/$genome_basename";
-            print $part_ofh ">$accession\n";
-            print $part_ofh $genome_subseq;
-            close $part_ofh;
+                open (my $part_ofh, ">$partition_dir/$genome_basename") or die "Error, cannot write to $partition_dir/$genome_basename";
+                print $part_ofh ">$accession\n";
+                print $part_ofh $genome_subseq;
+                close $part_ofh;
+            } else {
+                warn "### Skip $partition_dir/$genome_basename ...\n";
+            }
             
             foreach my $file_struct (@files_to_process) {
                 my $filename = $file_struct->{acc_file};
                 my $basename = $file_struct->{basename};
                 my $cmd = "$gff_partitioner $accession $range_lend $range_rend ADJUST_TO_ONE < $filename > $partition_dir/$basename";
-                &process_cmd($cmd);
+                unless(-e "$partition_dir/$basename"){
+                    &process_cmd($cmd);
+                } else {
+                    warn "### Skip $partition_dir/$basename ...\n";
+                }
             }
-            print $ofh "$accession\t$acc_dir\tY\t$partition_dir\n";
+            warn "### (Elapsed time: $now) Finished processing $partition_dir\n";
+            $pm->finish;
         }
+        $pm->wait_all_children;
     }
 }
 
@@ -200,6 +223,23 @@ close $ofh;
 
 exit(0);
 
+sub get_sequence_length {
+    my $file = shift;
+    my $seqlen = 0;
+    my $seqcount = 0;
+    open my $fh, $file or die $!;
+    while(<$fh>){
+        if(/^>/){
+            $seqcount++;
+            die if $seqcount > 1;
+            next;
+        }
+        chomp;
+        $seqlen += length($_);
+    }
+    close $fh;
+    return $seqlen;
+}
 
 
 ####
